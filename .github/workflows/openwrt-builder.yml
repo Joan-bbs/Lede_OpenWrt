@@ -3,7 +3,7 @@ name: Build OpenWrt
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 20 * * 5'  # 每周六凌晨 4 点编译，可自行修改
+    - cron: '0 20 * * 5'  # 每周六凌晨 4 点编译
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
@@ -22,23 +22,38 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: 初始化环境
-      run: |
-        sudo apt update -y
-        sudo apt full-upgrade -y
-        sudo apt install -y build-essential asciidoc binutils bzip2 gawk gettext git libncurses5-dev libz-dev patch unzip zlib1g-dev lib32gcc-s1 libc6-dev-i386 subversion flex uglifyjs git-core gcc-multilib p7zip p7zip-full msmtp libssl-dev texinfo libglib2.0-dev xmlto qemu-utils upx libelf-dev autoconf automake libtool autopoint device-tree-compiler g++-multilib antlr3 gperf
+    # ✅ 缓存 dl、staging_dir、build_dir，加快重复编译
+    - name: Cache OpenWrt build dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          openwrt/dl
+          openwrt/staging_dir
+          openwrt/build_dir
+        key: ${{ runner.os }}-openwrt-${{ env.REPO_BRANCH }}
+        restore-keys: |
+          ${{ runner.os }}-openwrt-
 
-    - name: 克隆源码
+    - name: 初始化编译环境
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y \
+          build-essential asciidoc binutils bzip2 gawk gettext git libncurses5-dev \
+          libz-dev patch unzip zlib1g-dev lib32gcc-s1 libc6-dev-i386 subversion flex \
+          uglifyjs p7zip p7zip-full msmtp libssl-dev texinfo libglib2.0-dev xmlto \
+          qemu-utils upx libelf-dev autoconf automake libtool autopoint device-tree-compiler \
+          g++-multilib antlr3 gperf
+
+    - name: 克隆 OpenWrt 源码
       run: |
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
         cd openwrt
-        [ -e $GITHUB_WORKSPACE/$FEEDS_CONF ] && mv $GITHUB_WORKSPACE/$FEEDS_CONF ./feeds.conf.default
+        [ -f $GITHUB_WORKSPACE/$FEEDS_CONF ] && cp $GITHUB_WORKSPACE/$FEEDS_CONF ./feeds.conf.default
 
     - name: DIY 第1部分
       run: |
         cd openwrt
-        chmod +x $GITHUB_WORKSPACE/$DIY_P1_SH
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+        bash $GITHUB_WORKSPACE/$DIY_P1_SH
 
     - name: 更新 & 安装 feeds
       run: |
@@ -49,22 +64,57 @@ jobs:
     - name: DIY 第2部分
       run: |
         cd openwrt
-        chmod +x $GITHUB_WORKSPACE/$DIY_P2_SH
-        $GITHUB_WORKSPACE/$DIY_P2_SH
+        bash $GITHUB_WORKSPACE/$DIY_P2_SH
 
     - name: 导入自定义配置
       run: |
         cd openwrt
-        [ -e $GITHUB_WORKSPACE/$CONFIG_FILE ] && mv $GITHUB_WORKSPACE/$CONFIG_FILE .config
+        [ -f $GITHUB_WORKSPACE/$CONFIG_FILE ] && cp $GITHUB_WORKSPACE/$CONFIG_FILE .config
 
     - name: 编译固件
       run: |
         cd openwrt
         make defconfig
         make -j$(nproc) || make -j1 V=s
+      env:
+        FORCE_UNSAFE_CONFIGURE: 1
+
+    - name: 打包固件文件
+      id: package
+      run: |
+        cd openwrt/bin/targets
+        FIRMWARE_DIR=$(find . -type d -mindepth 1 -maxdepth 1)
+        cd $FIRMWARE_DIR
+        mkdir -p $GITHUB_WORKSPACE/output
+        cp -r * $GITHUB_WORKSPACE/output/
+        cd $GITHUB_WORKSPACE/output
+        zip -r OpenWrt_firmware_$(date +%Y%m%d_%H%M).zip .
+        echo "firmware_zip=$(ls OpenWrt_firmware_*.zip)" >> $GITHUB_OUTPUT
 
     - name: 上传固件到 GitHub Actions
       uses: actions/upload-artifact@v4
       with:
         name: OpenWrt-firmware
-        path: openwrt/bin/targets/
+        path: output/
+
+    # ✅ 自动创建 Release 并上传固件
+    - name: 发布 Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: openwrt-${{ github.run_number }}-$(date +%Y%m%d)
+        name: "OpenWrt 自动构建 #${{ github.run_number }} ($(date +%Y-%m-%d))"
+        files: output/${{ steps.package.outputs.firmware_zip }}
+        body: |
+          🎉 自动构建的 OpenWrt 固件
+          - 源码：${{ env.REPO_URL }}
+          - 分支：${{ env.REPO_BRANCH }}
+          - 编译时间：$(date +%Y-%m-%d\ %H:%M)
+          - 工作流运行号：${{ github.run_number }}
+
+          📦 包含的文件：
+          ```
+          ${{ steps.package.outputs.firmware_zip }}
+          ```
+
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
