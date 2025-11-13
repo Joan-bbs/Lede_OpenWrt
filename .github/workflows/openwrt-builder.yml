@@ -2,8 +2,8 @@ name: Build OpenWrt
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 20 * * 5'  # 每周六凌晨 4 点编译
+  #schedule:
+    #- cron: '0 20 * * 5'  # 每周六凌晨 4 点编译
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
