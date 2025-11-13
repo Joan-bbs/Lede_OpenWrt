@@ -22,17 +22,14 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    # ✅ 缓存 dl、staging_dir、build_dir，加快重复编译
-    - name: Cache OpenWrt build dependencies
+    # ⭐ SAFE CACHE：只缓存 dl，稳定不污染工具链
+    - name: Cache DL
       uses: actions/cache@v4
       with:
-        path: |
-          openwrt/dl
-          openwrt/staging_dir
-          openwrt/build_dir
-        key: ${{ runner.os }}-openwrt-${{ env.REPO_BRANCH }}
+        path: openwrt/dl
+        key: ${{ runner.os }}-openwrt-dl-${{ env.REPO_BRANCH }}
         restore-keys: |
-          ${{ runner.os }}-openwrt-
+          ${{ runner.os }}-openwrt-dl-
 
     - name: 初始化编译环境
       run: |
@@ -42,7 +39,7 @@ jobs:
           libz-dev patch unzip zlib1g-dev lib32gcc-s1 libc6-dev-i386 subversion flex \
           uglifyjs p7zip p7zip-full msmtp libssl-dev texinfo libglib2.0-dev xmlto \
           qemu-utils upx libelf-dev autoconf automake libtool autopoint device-tree-compiler \
-          g++-multilib antlr3 gperf
+          g++-multilib antlr3 gperf libtool-bin pkg-config
 
     - name: 克隆 OpenWrt 源码
       run: |
@@ -71,33 +68,42 @@ jobs:
         cd openwrt
         [ -f $GITHUB_WORKSPACE/$CONFIG_FILE ] && cp $GITHUB_WORKSPACE/$CONFIG_FILE .config
 
-    - name: 编译固件
+    # ⭐ 自动 fallback：编译失败自动清理工具链并重试
+    - name: 编译固件（自动恢复）
       run: |
         cd openwrt
         make defconfig
-        make -j$(nproc) || make -j1 V=s
+        echo "开始第一次高速编译..."
+        make -j$(nproc) || {
+          echo "❌ 第一次编译失败，可能是工具链污染"
+          echo "🔧 执行 dirclean 清理 host toolchain..."
+          make dirclean
+          echo "♻️ 开始第二次编译（更稳定）..."
+          make -j$(nproc) V=s
+        }
       env:
         FORCE_UNSAFE_CONFIGURE: 1
 
-    - name: 打包固件文件
+    - name: 打包固件
       id: package
       run: |
         cd openwrt/bin/targets
-        FIRMWARE_DIR=$(find . -type d -mindepth 1 -maxdepth 1)
-        cd $FIRMWARE_DIR
+        TARGET_DIR=$(find . -type d -mindepth 1 -maxdepth 1)
+        cd $TARGET_DIR
         mkdir -p $GITHUB_WORKSPACE/output
         cp -r * $GITHUB_WORKSPACE/output/
         cd $GITHUB_WORKSPACE/output
-        zip -r OpenWrt_firmware_$(date +%Y%m%d_%H%M).zip .
-        echo "firmware_zip=$(ls OpenWrt_firmware_*.zip)" >> $GITHUB_OUTPUT
+        ZIP_NAME=OpenWrt_$(date +%Y%m%d_%H%M).zip
+        zip -r $ZIP_NAME .
+        echo "firmware_zip=$ZIP_NAME" >> $GITHUB_OUTPUT
 
-    - name: 上传固件到 GitHub Actions
+    - name: 上传到 Actions Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: OpenWrt-firmware
         path: output/
 
-    # ✅ 自动创建 Release 并上传固件
+    # ⭐ 自动发布 Release
     - name: 发布 Release
       uses: softprops/action-gh-release@v2
       with:
@@ -105,16 +111,11 @@ jobs:
         name: "OpenWrt 自动构建 #${{ github.run_number }} ($(date +%Y-%m-%d))"
         files: output/${{ steps.package.outputs.firmware_zip }}
         body: |
-          🎉 自动构建的 OpenWrt 固件
-          - 源码：${{ env.REPO_URL }}
-          - 分支：${{ env.REPO_BRANCH }}
-          - 编译时间：$(date +%Y-%m-%d\ %H:%M)
-          - 工作流运行号：${{ github.run_number }}
-
-          📦 包含的文件：
-          ```
-          ${{ steps.package.outputs.firmware_zip }}
-          ```
+          🎉 自动构建的 OpenWrt 固件  
+          - 源码：${{ env.REPO_URL }}  
+          - 分支：${{ env.REPO_BRANCH }}  
+          - 构建时间：$(date +%Y-%m-%d\ %H:%M)  
+          - 版本号：${{ github.run_number }}  
 
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
